@@ -34,16 +34,15 @@ class Diffusion(nn.Module):
             nn.Linear(self.width * 2, 1),
         )
 
-    def forward(self, x, timesteps, text_emb, video_emb):
-        cond_emb = self.embed_timestep(timesteps).squeeze(1)  # b, 512
+    def forward(self, x, timesteps, query_emb, target_emb):
+        # num is the model's num
+        # query_emb (batch, feat_size)
+        # target_emb (batch, num+1,  feat_size)
+        cond_emb = self.embed_timestep(timesteps).squeeze(1)  # batch, feat_size
 
-        v_weight = torch.einsum('ad,abvd->abv', [text_emb, video_emb])
-        v_weight = torch.softmax(v_weight / self.temp, dim=-1)
-        video_emb = torch.einsum('abv,abvd->abd', [v_weight, video_emb])
-
-        q = self.q_proj(text_emb + cond_emb)  # b, 512
-        k = self.k_proj(video_emb + cond_emb.unsqueeze(1))  # b, v, 512
-        v = self.v_proj(video_emb + cond_emb.unsqueeze(1))  # b, v, 512
+        q = self.q_proj(query_emb + cond_emb)  # batch, 512
+        k = self.k_proj(target_emb + cond_emb.unsqueeze(1))  # batch, num+1, feat_size
+        v = self.v_proj(target_emb + cond_emb.unsqueeze(1))  # batch, num+1, feat_size
 
         weight = torch.einsum('bd,bvd->bv', [q, k])
         weight = weight + x
@@ -51,9 +50,9 @@ class Diffusion(nn.Module):
         new_emb = torch.einsum('bv,bvd->bd', [weight, v])
         new_emb = self.proj(new_emb)
 
-        emb = torch.cat([new_emb.unsqueeze(1).repeat(1, video_emb.size(1), 1), video_emb], dim=-1)  # b, a, 512 * 2
+        emb = torch.cat([new_emb.unsqueeze(1).repeat(1, target_emb.size(1), 1), target_emb], dim=-1)  # batch, num+1, feat_size * 2
 
-        p = self.decoder(emb).squeeze(2)  # b, a
+        p = self.decoder(emb).squeeze(2)  # batch, num+1
         p += weight
 
         return p
@@ -80,16 +79,15 @@ class Diffusion_v(nn.Module):
             nn.Linear(self.width * 2, 1),
         )
 
-    def forward(self, x, timesteps, text_emb, video_emb):
-        cond_emb = self.embed_timestep(timesteps).squeeze(1)  # b, 512
+    def forward(self, x, timesteps, query_emb, target_emb):
+        # num is the model's num
+        # query_emb (batch, num+1, feat_size)
+        # target_emb (batch, feat_size)
+        cond_emb = self.embed_timestep(timesteps).squeeze(1)  # batch, feat_size
 
-        v_weight = torch.einsum('bad,bvd->bav', [text_emb, video_emb])
-        v_weight = torch.softmax(v_weight / self.temp, dim=-1)
-        video_emb = torch.einsum('bav,bvd->bad', [v_weight, video_emb])
-
-        q = self.q_proj(video_emb + cond_emb.unsqueeze(1))  # 12, 3, 512
-        k = self.k_proj(text_emb + cond_emb.unsqueeze(1))  # 12, 3, 512
-        v = self.v_proj(text_emb + cond_emb.unsqueeze(1))  # 12, 3, 512
+        q = self.q_proj(target_emb + cond_emb.unsqueeze(1))  # batch, num+1, feat_size
+        k = self.k_proj(query_emb + cond_emb.unsqueeze(1))  # batch, num+1, feat_size
+        v = self.v_proj(query_emb + cond_emb.unsqueeze(1))  # batch, num+1, feat_size
 
         weight = torch.einsum('bad,bad->ba', [q, k])
         weight = weight + x
@@ -97,9 +95,9 @@ class Diffusion_v(nn.Module):
         new_emb = torch.einsum('ba,bad->bd', [weight, v])
         new_emb = self.proj(new_emb)
 
-        emb = torch.cat([new_emb.unsqueeze(1).repeat(1, text_emb.size(1), 1), text_emb], dim=-1)  # b, a, 512 * 2
+        emb = torch.cat([new_emb.unsqueeze(1).repeat(1, query_emb.size(1), 1), query_emb], dim=-1)  # batch, num+1, feat_size * 2
 
-        p = self.decoder(emb).squeeze(2)  # b, a
+        p = self.decoder(emb).squeeze(2)  # batch, num+1
         p += weight
         return p
 
