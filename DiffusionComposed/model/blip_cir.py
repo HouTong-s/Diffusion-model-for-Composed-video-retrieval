@@ -9,6 +9,7 @@ from transformers.models.bert.configuration_bert import BertConfig
 from src.model.blip import create_vit, init_tokenizer, load_checkpoint
 from src.model.med import BertModel
 from src.tools.utils import print_dist
+from .diffusion import Diffusion, Diffusion_v
 
 
 
@@ -23,6 +24,7 @@ class BLIPCir(nn.Module):
         vit_ckpt_layer=12,
         embed_dim=256,
         train_vit=False,
+        stage = "discrimination"
     ):
         """
         Args:
@@ -32,6 +34,7 @@ class BLIPCir(nn.Module):
         """
         super().__init__()
 
+        self.stage = stage
         self.loss = loss
 
         self.visual_encoder, vision_width = create_vit(
@@ -57,6 +60,14 @@ class BLIPCir(nn.Module):
             p.requires_grad = False
 
         self.temp = 0.07
+        self.d_temp = 10
+
+        if self.stage == "generation":
+            self.diffusion_model = Diffusion(embed_dim, 0.1, self.temp)
+            self.diffusion_model_v = Diffusion_v(embed_dim, 0.1, self.temp)
+
+
+
 
     def forward(self, batch, fabric, schedule_sampler=None, diffusion=None):
         ref_img, tar_feat, caption, _ = batch
@@ -65,7 +76,7 @@ class BLIPCir(nn.Module):
         query_feat = self.get_text_image_fusion_feat(ref_img,caption)
                 # Encode the target image
         tar_feat = tar_feat.to(device)
-        tar_img_feat = F.normalize(tar_feat, dim=-1)
+        tar_feat = F.normalize(tar_feat, dim=-1)
 
         loss, discrimination_loss, generation_loss = 0., 0., 0.
 
@@ -74,16 +85,19 @@ class BLIPCir(nn.Module):
             query_feat = fabric.all_gather(query_feat, sync_grads=True)
             query_feat = einops.rearrange(query_feat, "d b e -> (d b) e")
 
-            tar_img_feat = fabric.all_gather(tar_img_feat, sync_grads=True)
-            tar_img_feat = einops.rearrange(tar_img_feat, "d b e -> (d b) e")
+            tar_feat = fabric.all_gather(tar_feat, sync_grads=True)
+            tar_feat = einops.rearrange(tar_feat, "d b e -> (d b) e")
 
-        discrimination_loss = self.loss(query_feat, tar_img_feat, self.temp)
+        # q2t query to target
+        # t2q target to query
+        q2t_logits = query_feat @ tar_feat.T
+        t2q_logits = q2t_logits.T
+
+        discrimination_loss = self.loss(q2t_logits, self.temp)
         loss += discrimination_loss
 
-        logit_scale = fabric.logit_scale
-
-        t2v_logits = query_feat @ tar_feat.T
-        v2t_logits = t2v_logits.T
+        q2t_logits = query_feat @ tar_feat.T
+        t2q_logits = q2t_logits.T
 
         if self.stage == "discrimination":
             return loss, discrimination_loss, torch.zeros_like(discrimination_loss)
@@ -92,12 +106,12 @@ class BLIPCir(nn.Module):
         num = self.config.num
 
         query_feat, tar_feat = query_feat.detach(), tar_feat.detach()
-        t2v_logits, v2t_logits = t2v_logits.detach(), v2t_logits.detach()
+        q2t_logits, t2q_logits = q2t_logits.detach(), t2q_logits.detach()
         a, b = query_feat.size(0), tar_feat.size(1)
 
         diagonal_mask = torch.eye(weights_t2v.size(0), weights_t2v.size(1)).bool().to(weights_t2v.device)
-        weights_t2v = F.softmax(t2v_logits, dim=1)
-        weights_v2t = F.softmax(v2t_logits, dim=1)
+        weights_t2v = F.softmax(q2t_logits, dim=1)
+        weights_v2t = F.softmax(t2q_logits, dim=1)
         weights_t2v.masked_fill_(diagonal_mask, -1)
         weights_v2t.masked_fill_(diagonal_mask, -1)
 
@@ -106,9 +120,9 @@ class BLIPCir(nn.Module):
         for b in range(weights_t2v.size(0)):
             
             _, neg_idx = weights_t2v[b].topk(num, largest=True, sorted=True)
-            temp = [tar_feat[b, :, :]]
+            temp = [tar_feat[b]]
             for i in neg_idx:
-                temp.append(tar_feat[i, :, :])
+                temp.append(tar_feat[i])
             #temp (num+1,frames,feat_size)
             target_embeds_neg.append(torch.stack(temp, dim=0))
         target_embeds_neg = torch.stack(target_embeds_neg, dim=0)
@@ -132,17 +146,17 @@ class BLIPCir(nn.Module):
 
         output = diffusion.training_losses(self.diffusion_model, micro, t, {"text_emb": query_feat,
                                                                             "video_emb": target_embeds_neg},
-                                            temp=self.config.d_temp)
+                                            temp=self.d_temp)
         generation_loss += output["kl_loss"]
 
         output = diffusion.training_losses(self.diffusion_model_v, micro, t, {"text_emb": query_embeds_neg,
                                                                                 "video_emb": tar_feat},
-                                            temp=self.config.d_temp)
+                                            temp=self.d_temp)
         generation_loss += output["kl_loss"]
 
         loss += generation_loss
 
-        return loss
+        return loss, discrimination_loss, generation_loss
     
     def get_text_image_fusion_feat(self, ref_img, caption):
         device = ref_img.device

@@ -24,6 +24,10 @@ defaults:
   - model/scheduler: cosine
   - model/loss: hn_nce
   - model/ckpt: blip-l-coco
+  - diffusion: base
+  - diffusion/optimizer: adamw
+  - diffusion/scheduler: cosine
+  - diffusion/ckpt: blip-l-coco
 
   - experiment: null
 

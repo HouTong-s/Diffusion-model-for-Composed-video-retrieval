@@ -45,18 +45,14 @@ class HardNegativeNCE(nn.Module):
 
     def forward(
         self,
-        video_embds: torch.Tensor,
-        text_embds: torch.Tensor,
+        sim_matrix: torch.Tensor,
         temp,
     ):
         """
         Args:
-            video_embds: (batch_size, video_embd_dim)
-            text_embds: (batch_size, text_embd_dim)
+            sim_matrix: (batch_size, batch_size)
         """
-        batch_size = video_embds.size(0)
-        # computation of the similarity matrix
-        sim_matrix = video_embds @ text_embds.T  # (batch_size, batch_size)
+        batch_size = sim_matrix.size(0)
         # scale the similarity matrix with the temperature
         sim_matrix = sim_matrix / temp
         sim_matrix = sim_matrix.float()
